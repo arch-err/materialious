@@ -1,0 +1,75 @@
+name: Patched image
+on:
+  push:
+    branches: [patched]
+  pull_request:
+    branches: [patched]
+  workflow_dispatch:
+  schedule:
+    - cron: '17 5 * * *'
+permissions:
+  contents: read
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/arch-err/materialious
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Build from fresh base images
+        run: |
+          docker buildx build --pull --load --tag "$IMAGE:$GITHUB_SHA" \
+            --label org.opencontainers.image.source="https://github.com/$GITHUB_REPOSITORY" \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            --label org.opencontainers.image.licenses=AGPL-3.0-only \
+             --file materialious/FullDockerfile materialious
+      - name: Verify certificate distrust
+        run: |
+          set -o pipefail
+          security/check-image.sh "$IMAGE:$GITHUB_SHA" node | tee certificate-tests.txt
+      - name: Scan image
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD:/reports" \
+            aquasec/trivy@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c \
+            image --image-src docker --scanners vuln --timeout 15m \
+            --format json --output /reports/trivy.json "$IMAGE:$GITHUB_SHA"
+          python3 - <<'PYTHON'
+          import json
+          report = json.load(open('trivy.json'))
+          blocked = [(v['VulnerabilityID'], v['PkgName'], v['Severity'])
+                     for result in report.get('Results', [])
+                     for v in result.get('Vulnerabilities', [])
+                     if v['Severity'] in ('HIGH', 'CRITICAL')]
+          for finding in blocked:
+              print(*finding)
+          if blocked:
+              raise SystemExit('Image has high or critical findings')
+          PYTHON
+      - name: Preserve security reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: security-${{ github.sha }}
+          path: |
+            trivy.json
+            certificate-tests.txt
+          if-no-files-found: warn
+      - name: Publish checked image
+        if: github.event_name != 'pull_request'
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker push "$IMAGE:$GITHUB_SHA"
+          docker tag "$IMAGE:$GITHUB_SHA" "$IMAGE:patched"
+          docker push "$IMAGE:patched"
+          docker inspect "$IMAGE:$GITHUB_SHA" --format '{{json .RepoDigests}}' >> "$GITHUB_STEP_SUMMARY"

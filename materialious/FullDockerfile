@@ -1,9 +1,9 @@
-FROM node:26-alpine AS builder
+FROM node:26.13.0-alpine3.24 AS builder
 WORKDIR /app
 
 COPY . .
 
-RUN npm install --legacy-peer-deps
+RUN npm ci --legacy-peer-deps
 
 # Tell SvelteKit to use node adapter.
 ENV PUBLIC_BUILD_WITH_BACKEND="true"
@@ -11,7 +11,12 @@ ENV PUBLIC_BUILD_WITH_BACKEND="true"
 RUN npm run build
 RUN npm prune --omit=dev --legacy-peer-deps
 
-FROM node:26-alpine
+FROM node:26.13.0-alpine3.24
+
+# npm and Yarn are build tools; the server only needs Node.
+RUN apk upgrade --no-cache && apk add --no-cache ca-certificates \
+    && rm -rf /usr/local/lib/node_modules/npm /opt/yarn-* \
+    && rm -f /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/yarn /usr/local/bin/yarnpkg
 
 WORKDIR /app
 
